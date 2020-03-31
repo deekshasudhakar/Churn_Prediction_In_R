@@ -1,0 +1,601 @@
+---
+title: "Customer Churn Analysis"
+output:
+  html_document:
+    html_document:
+    theme: default
+    highlight: tango
+    fig_width: 10
+    fig_height: 7
+    
+---
+<style type="text/css">
+.main-container {
+  max-width: 1300px;
+  margin-left: auto;
+  margin-right: auto;
+  font-size: 1.4em
+}
+code.r{
+  font-size: 20px;
+}
+</style>
+
+```{r message=FALSE, warning=FALSE, paged.print=FALSE}
+#### Installing Libraries
+
+libraries <- c("plotly","dplyr","ggplot2","tidyverse","caret","leaps","gains","readxl","tidyverse","dplyr","plotrix","fastDummies","caret","FNN","rpart","rpart.plot","plotrix","plotly","summarytools","ggcorrplot","PerformanceAnalytics","gridExtra","ROCR","RColorBrewer","MASS","rattle")
+
+for (libnames in libraries){
+  if(!(libnames %in% installed.packages()[,"Package"])){
+    install.packages(libnames,dependency = TRUE)
+  }
+  else {
+    sapply(libnames, library, character.only = TRUE)
+    }
+}
+
+```
+## Importing data
+```{r message=FALSE, warning=FALSE}
+###### Data overview
+
+churn.df <- read.csv("WA_Fn-UseC_-Telco-Customer-Churn.csv",stringsAsFactors = FALSE)
+
+#head(churn.df,20)
+
+Table.summary.df<- data.frame(sapply(churn.df, function(z) length(unique(z))),
+                           sapply(churn.df, function(z) class(z)),
+                           sapply(churn.df, function(z) sum(is.na(z))),
+                           sapply(churn.df, function(z) sum(is.null(z)))) 
+colnames(Table.summary.df)<-c('Unique_values','Class_of_column','Missing_values','Null_Values')
+
+
+print(dfSummary(churn.df[,-1], style = 'grid', plain.ascii = FALSE),method = 'render')
+
+```
+## Data manipulation
+```{r message=FALSE, warning=FALSE}
+########### Treating the data
+
+## Removing NA records
+churn.df.complete <- churn.df[complete.cases(churn.df),]
+
+## changing "No phone service" to "No"
+
+churn.df.complete$OnlineSecurity[which(churn.df.complete$OnlineSecurity == "No internet service")] = "No"
+churn.df.complete$OnlineBackup[which(churn.df.complete$OnlineBackup == "No internet service")] = "No"
+churn.df.complete$DeviceProtection[which(churn.df.complete$DeviceProtection == "No internet service")] = "No"
+churn.df.complete$TechSupport[which(churn.df.complete$TechSupport == "No internet service")] = "No"
+churn.df.complete$StreamingTV[which(churn.df.complete$StreamingTV == "No internet service")] = "No"
+churn.df.complete$StreamingMovies[which(churn.df.complete$StreamingMovies == "No internet service")] = "No"
+
+churn.df.complete$SeniorCitizen <- ifelse(churn.df.complete$SeniorCitizen == 1,"Yes","No")
+
+churn.df.complete$tenure_group[as.numeric(churn.df.complete$tenure) <= 12] = "Tenure_0-12"
+churn.df.complete$tenure_group[(as.numeric(churn.df.complete$tenure) > 12) & (as.numeric(churn.df.complete$tenure) <= 24)]= "Tenure_12-24"
+churn.df.complete$tenure_group[(as.numeric(churn.df.complete$tenure) > 24) & (as.numeric(churn.df.complete$tenure) <= 48)] = "Tenure_24-48"
+churn.df.complete$tenure_group[(as.numeric(churn.df.complete$tenure) > 48) & (as.numeric(churn.df.complete$tenure) <= 60)] = "Tenure_48-60"
+churn.df.complete$tenure_group[as.numeric(churn.df.complete$tenure) > 60] = "Tenure_gt_60"
+
+
+Table.summary<- data.frame(sapply(churn.df.complete, function(z) length(unique(z))),
+                           sapply(churn.df.complete, function(z) class(z)),
+                           sapply(churn.df.complete, function(z) sum(is.na(z))),
+                           sapply(churn.df.complete, function(z) sum(is.null(z)))) 
+colnames(Table.summary)<-c('Unique_values','Class_of_column','Missing_values','Null_Values')
+
+#Separating catagorical and numerical columns
+id.col <- 'customerID'
+target.col <- 'Churn'
+categorical.var <- rownames(Table.summary.df[Table.summary.df$Unique_values<= 6,])
+continuous.var <- colnames(churn.df[,!(colnames(churn.df) %in% c(categorical.var,id.col,target.col))])
+```
+
+
+```{r message=FALSE, warning=FALSE}
+binary.cols <- rownames(Table.summary[(Table.summary$Unique_values ==  2 & rownames(Table.summary)!="Churn") ,])
+multiple.cols <-categorical.var[!(categorical.var %in% c(binary.cols,"Churn"))]
+
+telecom.churn.df <- churn.df.complete
+for (columns in multiple.cols){
+  telecom.churn.df <- fastDummies::dummy_cols(telecom.churn.df,select_columns = columns)
+}
+
+#dropping customerID
+telecom.churn.df <- telecom.churn.df[,-1]
+
+
+#dropping multiple columns
+telecom.churn.final <- telecom.churn.df[,!(colnames(telecom.churn.df) %in% c(multiple.cols,"tenure_group"))]
+
+
+for (bin.cols in binary.cols){
+   if(bin.cols != "gender"){
+    telecom.churn.final[,bin.cols] <- ifelse(telecom.churn.final[,bin.cols] == "Yes",1,0) 
+   }
+  else{
+    telecom.churn.final[,bin.cols] <- ifelse(telecom.churn.final[,bin.cols] == "Male",1,0)
+  }
+  
+}
+
+telecom.churn.final[,target.col] <- ifelse(telecom.churn.final[,target.col] == "Yes",1,0) 
+```
+
+## EDA Charts
+```{r message=FALSE, warning=FALSE}
+
+telecom.df <- churn.df.complete
+churn_cust <- telecom.df[ which(telecom.df$Churn=='Yes'), ]
+non_churn_cust <- telecom.df[ which(telecom.df$Churn=='No'), ]
+
+ggplot(data = telecom.df, aes(Churn)) + geom_bar(aes(y=..prop.., group=1))
+
+
+a <- list(
+  text = "Churned Customers                                          Non Churned Customers",
+  font = "Open Sans",
+  xref = "paper",
+  yref = "paper",
+  yanchor = "bottom",
+  xanchor = "Center",
+  align = "Center",
+  x = 0.53,
+  y = 0,
+  size = 3,
+  showarrow = FALSE)
+
+plot_ly() %>%
+  add_pie(data = count(churn_cust, gender), labels = ~gender, values = ~n,
+          name = "Gender", domain = list(x = c(0.05, 0.5), y = c(0, 1)),hole = 0.6) %>%
+  add_pie(data = count(non_churn_cust, gender), labels = ~gender, values = ~n,
+          name = "Gender", domain = list(x = c(0.55, 1), y = c(0, 1)),hole = 0.6) %>%
+  layout( title = "Gender Distribution",  showlegend = T, autosize=TRUE,annotations = a,
+          xaxis = list(showgrid = FALSE, zeroline = FALSE, showticklabels = FALSE),
+          yaxis = list(showgrid = FALSE, zeroline = FALSE, showticklabels = FALSE))
+plot_ly() %>%
+  add_pie(data = count(churn_cust, SeniorCitizen), labels = ~SeniorCitizen, values = ~n,
+          name = "Senior Citizen", domain = list(x = c(0.05, 0.5), y = c(0, 1)),hole = 0.6) %>%
+  add_pie(data = count(non_churn_cust, SeniorCitizen), labels = ~SeniorCitizen, values = ~n,
+          name = "Senior Citizen", domain = list(x = c(0.55, 1), y = c(0, 1)),hole = 0.6) %>%
+  layout( title = "Senior Citizen Distribution",  showlegend = T, autosize=TRUE,annotations = a,
+          xaxis = list(showgrid = FALSE, zeroline = FALSE, showticklabels = FALSE),
+          yaxis = list(showgrid = FALSE, zeroline = FALSE, showticklabels = FALSE))
+plot_ly() %>%
+  add_pie(data = count(churn_cust, Partner), labels = ~Partner, values = ~n,
+          name = "Partner", domain = list(x = c(0.05, 0.5), y = c(0, 1)),hole = 0.6) %>%
+  add_pie(data = count(non_churn_cust, Partner), labels = ~Partner, values = ~n,
+          name = "Partner", domain = list(x = c(0.55, 1), y = c(0, 1)),hole = 0.6) %>%
+  layout( title = "Partner Distribution",  showlegend = T, autosize=TRUE,annotations = a,
+          xaxis = list(showgrid = FALSE, zeroline = FALSE, showticklabels = FALSE),
+          yaxis = list(showgrid = FALSE, zeroline = FALSE, showticklabels = FALSE))
+
+plot_ly() %>%
+  add_pie(data = count(churn_cust, Dependents), labels = ~Dependents, values = ~n,
+          name = "Dependents", domain = list(x = c(0.05, 0.5), y = c(0, 1)),hole = 0.6) %>%
+  add_pie(data = count(non_churn_cust, Dependents), labels = ~Dependents, values = ~n,
+          name = "Dependents", domain = list(x = c(0.55, 1), y = c(0, 1)),hole = 0.6) %>%
+  layout( title = "Dependents Distribution",  showlegend = T, autosize=TRUE,annotations = a,
+          xaxis = list(showgrid = FALSE, zeroline = FALSE, showticklabels = FALSE),
+          yaxis = list(showgrid = FALSE, zeroline = FALSE, showticklabels = FALSE))
+
+plot_ly() %>%
+  add_pie(data = count(churn_cust, PhoneService), labels = ~PhoneService, values = ~n,
+          name = "Phone Service", domain = list(x = c(0.05, 0.5), y = c(0, 1)),hole = 0.6) %>%
+  add_pie(data = count(non_churn_cust, PhoneService), labels = ~PhoneService, values = ~n,
+          name = "Phone Service", domain = list(x = c(0.55, 1), y = c(0, 1)),hole = 0.6) %>%
+  layout( title = "Phone Service Distribution",  showlegend = T, autosize=TRUE,annotations = a,
+          xaxis = list(showgrid = FALSE, zeroline = FALSE, showticklabels = FALSE),
+          yaxis = list(showgrid = FALSE, zeroline = FALSE, showticklabels = FALSE))
+
+plot_ly() %>%
+  add_pie(data = count(churn_cust, MultipleLines), labels = ~MultipleLines, values = ~n,
+          name = "Multiple Lines", domain = list(x = c(0.05, 0.5), y = c(0, 1)),hole = 0.6) %>%
+  add_pie(data = count(non_churn_cust, MultipleLines), labels = ~MultipleLines, values = ~n,
+          name = "Multiple Lines", domain = list(x = c(0.55, 1), y = c(0, 1)),hole = 0.6) %>%
+  layout( title = "Multiple Lines Distribution",  showlegend = T, autosize=TRUE,annotations = a,
+          xaxis = list(showgrid = FALSE, zeroline = FALSE, showticklabels = FALSE),
+          yaxis = list(showgrid = FALSE, zeroline = FALSE, showticklabels = FALSE))
+
+plot_ly() %>%
+  add_pie(data = count(churn_cust, InternetService), labels = ~InternetService, values = ~n,
+          name = "Internet Service", domain = list(x = c(0.05, 0.5), y = c(0, 1)),hole = 0.6) %>%
+  add_pie(data = count(non_churn_cust, InternetService), labels = ~InternetService, values = ~n,
+          name = "Internet Service", domain = list(x = c(0.55, 1), y = c(0, 1)),hole = 0.6) %>%
+  layout( title = "Internet Service Distribution",  showlegend = T, autosize=TRUE,annotations = a,
+          xaxis = list(showgrid = FALSE, zeroline = FALSE, showticklabels = FALSE),
+          yaxis = list(showgrid = FALSE, zeroline = FALSE, showticklabels = FALSE))
+
+plot_ly() %>%
+  add_pie(data = count(churn_cust, OnlineSecurity), labels = ~OnlineSecurity, values = ~n,
+          name = "Online Security", domain = list(x = c(0.05, 0.5), y = c(0, 1)),hole = 0.6) %>%
+  add_pie(data = count(non_churn_cust, OnlineSecurity), labels = ~OnlineSecurity, values = ~n,
+          name = "Online Security", domain = list(x = c(0.55, 1), y = c(0, 1)),hole = 0.6) %>%
+  layout( title = "Online Security Distribution",  showlegend = T, autosize=TRUE,annotations = a,
+          xaxis = list(showgrid = FALSE, zeroline = FALSE, showticklabels = FALSE),
+          yaxis = list(showgrid = FALSE, zeroline = FALSE, showticklabels = FALSE))
+
+plot_ly() %>%
+  add_pie(data = count(churn_cust, OnlineBackup), labels = ~OnlineBackup, values = ~n,
+          name = "Online Backup", domain = list(x = c(0.05, 0.5), y = c(0, 1)),hole = 0.6) %>%
+  add_pie(data = count(non_churn_cust, OnlineBackup), labels = ~OnlineBackup, values = ~n,
+          name = "Online Backup", domain = list(x = c(0.55, 1), y = c(0, 1)),hole = 0.6) %>%
+  layout( title = "Online Backup Distribution",  showlegend = T, autosize=TRUE,annotations = a,
+          xaxis = list(showgrid = FALSE, zeroline = FALSE, showticklabels = FALSE),
+          yaxis = list(showgrid = FALSE, zeroline = FALSE, showticklabels = FALSE))
+
+plot_ly() %>%
+  add_pie(data = count(churn_cust, DeviceProtection), labels = ~DeviceProtection, values = ~n,
+          name = "Device Protection", domain = list(x = c(0.05, 0.5), y = c(0, 1)),hole = 0.6) %>%
+  add_pie(data = count(non_churn_cust, DeviceProtection), labels = ~DeviceProtection, values = ~n,
+          name = "Device Protection", domain = list(x = c(0.55, 1), y = c(0, 1)),hole = 0.6) %>%
+  layout( title = "Device Protection Distribution",  showlegend = T, autosize=TRUE,annotations = a,
+          xaxis = list(showgrid = FALSE, zeroline = FALSE, showticklabels = FALSE),
+          yaxis = list(showgrid = FALSE, zeroline = FALSE, showticklabels = FALSE))
+
+plot_ly() %>%
+  add_pie(data = count(churn_cust, TechSupport), labels = ~TechSupport, values = ~n,
+          name = "Tech Support", domain = list(x = c(0.05, 0.5), y = c(0, 1)),hole = 0.6) %>%
+  add_pie(data = count(non_churn_cust, TechSupport), labels = ~TechSupport, values = ~n,
+          name = "Tech Support", domain = list(x = c(0.55, 1), y = c(0, 1)),hole = 0.6) %>%
+  layout( title = "Tech Support Distribution",  showlegend = T, autosize=TRUE,annotations = a,
+          xaxis = list(showgrid = FALSE, zeroline = FALSE, showticklabels = FALSE),
+          yaxis = list(showgrid = FALSE, zeroline = FALSE, showticklabels = FALSE))
+
+plot_ly() %>%
+  add_pie(data = count(churn_cust, StreamingTV), labels = ~StreamingTV, values = ~n,
+          name = "StreamingTV", domain = list(x = c(0.05, 0.5), y = c(0, 1)),hole = 0.6) %>%
+  add_pie(data = count(non_churn_cust, StreamingTV), labels = ~StreamingTV, values = ~n,
+          name = "StreamingTV", domain = list(x = c(0.55, 1), y = c(0, 1)),hole = 0.6) %>%
+  layout( title = "StreamingTV Distribution",  showlegend = T, autosize=TRUE,annotations = a,
+          xaxis = list(showgrid = FALSE, zeroline = FALSE, showticklabels = FALSE),
+          yaxis = list(showgrid = FALSE, zeroline = FALSE, showticklabels = FALSE))
+
+plot_ly() %>%
+  add_pie(data = count(churn_cust, StreamingMovies), labels = ~StreamingMovies, values = ~n,
+          name = "Streaming Movies", domain = list(x = c(0.05, 0.5), y = c(0, 1)),hole = 0.6) %>%
+  add_pie(data = count(non_churn_cust, StreamingMovies), labels = ~StreamingMovies, values = ~n,
+          name = "Streaming Movies", domain = list(x = c(0.55, 1), y = c(0, 1)),hole = 0.6) %>%
+  layout( title = "Streaming Movies Distribution",  showlegend = T, autosize=TRUE,annotations = a,
+          xaxis = list(showgrid = FALSE, zeroline = FALSE, showticklabels = FALSE),
+          yaxis = list(showgrid = FALSE, zeroline = FALSE, showticklabels = FALSE))
+
+plot_ly() %>%
+  add_pie(data = count(churn_cust, Contract), labels = ~Contract, values = ~n,
+          name = "Contract", domain = list(x = c(0.05, 0.5), y = c(0, 1)),hole = 0.6)%>%
+  add_pie(data = count(non_churn_cust, Contract), labels = ~Contract, values = ~n,
+          name = "Contract", domain = list(x = c(0.55, 1), y = c(0, 1)),hole = 0.6) %>%
+  layout( title = "Contract Distribution",  showlegend = T, autosize=TRUE,annotations = a,
+          xaxis = list(showgrid = FALSE, zeroline = FALSE, showticklabels = FALSE),
+          yaxis = list(showgrid = FALSE, zeroline = FALSE, showticklabels = FALSE))
+
+plot_ly() %>%
+  add_pie(data = count(churn_cust, PaperlessBilling), labels = ~PaperlessBilling, values = ~n,
+          name = "Paperless Billing", domain = list(x = c(0.05, 0.5), y = c(0, 1)),hole = 0.6)%>%
+  add_pie(data = count(non_churn_cust, PaperlessBilling), labels = ~PaperlessBilling, values = ~n,
+          name = "PaperlessBilling", domain = list(x = c(0.55, 1), y = c(0, 1)),hole = 0.6) %>%
+  layout( title = "Paperless Billing Distribution",  showlegend = T, autosize=TRUE,annotations = a,
+          xaxis = list(showgrid = FALSE, zeroline = FALSE, showticklabels = FALSE),
+          yaxis = list(showgrid = FALSE, zeroline = FALSE, showticklabels = FALSE))
+
+plot_ly() %>%
+  add_pie(data = count(churn_cust, PaymentMethod), labels = ~PaymentMethod, values = ~n,
+          name = "Payment Method", domain = list(x = c(0.05, 0.5), y = c(0, 1)),hole = 0.6)%>%
+  add_pie(data = count(non_churn_cust, PaymentMethod), labels = ~PaymentMethod, values = ~n,
+          name = "Payment Method", domain = list(x = c(0.55, 1), y = c(0, 1)),hole = 0.6) %>%
+  layout( title = "Payment Method Distribution",  showlegend = T, autosize=TRUE,annotations = a,
+          xaxis = list(showgrid = FALSE, zeroline = FALSE, showticklabels = FALSE),
+          yaxis = list(showgrid = FALSE, zeroline = FALSE, showticklabels = FALSE))
+
+
+plot_ly() %>%
+  add_pie(data = count(churn_cust, tenure_group), labels = ~tenure_group, values = ~n,
+          name = "Tenure Group", domain = list(x = c(0.0, 0.45), y = c(0, 1)),hole = 0.6)%>%
+  add_pie(data = count(non_churn_cust, tenure_group), labels = ~tenure_group, values = ~n,
+          name = "Tenure Group", domain = list(x = c(0.50, .95), y = c(0, 1)),hole = 0.6) %>%
+  layout( title = "Tenure Group Distribution",  showlegend = T, autosize=TRUE,annotations = a,
+          xaxis = list(showgrid = FALSE, zeroline = FALSE, showticklabels = FALSE),
+          yaxis = list(showgrid = FALSE, zeroline = FALSE, showticklabels = FALSE))
+
+theme_update(plot.title = element_text(hjust = 0.5))
+ggplot(churn.df.complete, aes(x = MonthlyCharges, y=tenure)) + geom_point(aes(color = Churn)) + labs(x= "Monthly Charges", y = "Tenure") + ggtitle("Monthly Charges and Tenure based on Customer Churn")
+
+ggplot(churn.df.complete, aes(TotalCharges, tenure)) + geom_point(aes(color = Churn)) + labs(x= "Total Charges", y = "Tenure") + ggtitle("Total Charges and Tenure based on Customer Churn")
+
+ggplot(churn.df.complete, aes(TotalCharges, MonthlyCharges)) + geom_point(aes(color = Churn))+labs(x= "Total Charges", y = "Monthly Charges") + ggtitle("Monthly Charges and Total Charges based on Customer Churn")
+
+ggplot(churn.df.complete, aes(MonthlyCharges, TotalCharges)) + geom_point(aes(color = tenure_group, shape = Churn)) + labs(x= "Monthly Charges", y = "Total Charges") + ggtitle("Total Charges and Monthly Charges based on Tenure group") 
+
+ggplot(churn.df.complete, aes(x=tenure, fill=Churn)) +
+    geom_histogram(binwidth=2, position="dodge")
+
+ggplot(churn.df.complete, aes(x=MonthlyCharges, fill=Churn)) +
+    geom_histogram(binwidth=3, position="dodge")
+
+ggplot(churn.df.complete, aes(x=TotalCharges, fill=Churn)) +
+    geom_histogram(binwidth=125, position="dodge")
+
+ggcorrplot(cor(telecom.churn.final[,c(1:15,17,29)]),colors = c("#6D9EC1", "white", "#E46726"),ggtheme = ggplot2::theme_gray) 
+  
+
+ 
+```
+```{r message=FALSE,warning=FALSE,fig.height= 7, fig.width=7,fig.align="center"}
+
+t <- data.frame(sapply(telecom.churn.final, function(z) length(unique(z))),
+                sapply(telecom.churn.final, function(z) class(z)))
+colnames(t)<-c('Unique_values',"class")
+binary.names <- rownames(t[t$Unique_values==2,])
+
+ 
+telecom.count.churn <- telecom.churn.final[telecom.churn.final$Churn == "1",]
+
+j <- data.frame(column= NA,"count_of_0" = NA,"count_of_1" = NA)
+for (x in binary.names){
+    j <- rbind(j,c(x,table(telecom.count.churn[,x])[1],table(telecom.count.churn[,x])[2]))
+  
+}
+
+j.complete <- j[complete.cases(j),]
+
+p1 <- plot_ly(
+  type = 'scatterpolar',
+  fill = 'toself'
+) %>%
+  add_trace(
+    r = j.complete$count_of_0,
+    theta = j.complete$column,
+    name = 'count_of_0'
+  ) %>%
+  add_trace(
+    r = j.complete$count_of_1,
+    theta = j.complete$column,
+    name = 'count_of_1'
+  ) %>%
+  layout(title = "Churned Customers",
+    polar = list(
+      radialaxis = list(
+        visible = T,
+        range = c(0,max(as.numeric(c(j.complete$count_of_0,j.complete$count_of_1)))+300)
+      )
+    )
+  )
+p1
+
+telecom.count.notchurn <- telecom.churn.final[telecom.churn.final$Churn == "0",]
+
+j <- data.frame(column= NA,"count_of_0" = NA,"count_of_1" = NA)
+for (x in binary.names){
+    j <- rbind(j,c(x,table(telecom.count.notchurn[,x])[1],table(telecom.count.notchurn[,x])[2]))
+  
+}
+
+j.complete <- j[complete.cases(j),]
+
+p2 <- plot_ly(
+  type = 'scatterpolar',
+  fill = 'toself'
+) %>%
+  add_trace(
+    r = j.complete$count_of_0,
+    theta = j.complete$column,
+    name = 'count_of_0'
+  ) %>%
+  add_trace(
+    r = j.complete$count_of_1,
+    theta = j.complete$column,
+    name = 'count_of_1'
+  ) %>%
+  layout(title = "NonChurned Customers", textposition = "outside",
+    polar = list(
+      radialaxis = list(
+        visible = T,
+        range = c(0,max(as.numeric(c(j.complete$count_of_0,j.complete$count_of_1)))+300)
+      )
+    )
+  )
+p2
+```
+
+##Logistic Regression
+```{r message=FALSE, warning=FALSE}
+#spliting data
+set.seed(123)
+valid.index <- createDataPartition(telecom.churn.final$Churn , p=0.75, list = FALSE)
+telecom.train.df <- telecom.churn.final[valid.index,]
+telecom.test.df <- telecom.churn.final[-valid.index,]
+
+##scaling continuous.var
+normalized.value <- preProcess(telecom.train.df[,continuous.var],method = c("center","scale"))
+telecom.train.norm <- predict(normalized.value, telecom.train.df)
+telecom.test.norm <- predict(normalized.value, telecom.test.df)
+
+######Logistic Regression
+logit.reg <- glm(Churn ~.,data=telecom.train.norm[,c(-1)], family = "binomial")
+summary(logit.reg)
+       #turn off warnings
+logit.reg.pred <- predict(logit.reg,telecom.test.norm[,-16] , type = "response")
+
+logit.model.report <- confusionMatrix(factor(ifelse(logit.reg.pred > 0.5,1,0),labels = c(0,1)), factor(telecom.test.norm$Churn,labels = c(0,1)))
+logit.model.report
+
+##Lift Curve
+gain <- gains(telecom.test.norm$Churn,logit.reg.pred)
+plot(c(0,gain$cume.pct.of.total*sum((telecom.test.norm$Churn)))~c(0,gain$cume.obs),xlab="# Cases", ylab="Cumulative", main = "Lift Chart", type ="l")
+lines(c(0,sum(telecom.test.norm$Churn))~c(0, dim(telecom.test.norm)[1]), lty=2)
+
+###Decile Chart
+heights <- gain$mean.resp/mean((telecom.test.norm$Churn))
+midpoints <- barplot(heights, names.arg = gain$depth, ylim = c(0,4),
+xlab = "Percentile", ylab = "Mean Response", main = "Decile-wise lift chart")
+text(midpoints, heights+0.5, labels=round(heights, 1), cex = 0.8)
+```
+
+<br>
+## Decison Tree
+<br>
+```{r decision tree, message=FALSE, warning=FALSE}
+
+set.seed(123)
+
+
+cv.ct <- rpart(Churn ~ ., data = telecom.train.df, method = "class", cp = 0.00001, minsplit = 1, xval = 10)  # minsplit is the minimum number of observations in a node for a split to be attempted. xval is number K of folds in a K-fold cross-validation.
+pruned.ct <- prune(cv.ct, cp = 0.004)
+
+default.ct.point.pred.train <- predict(pruned.ct, 
+                                       data = telecom.train.df, 
+                                       type = "class")
+confusionMatrix(default.ct.point.pred.train, as.factor(telecom.train.df$Churn))
+
+    ### for Validation set
+default.ct.point.pred.valid <- predict(pruned.ct, 
+                                       newdata = telecom.test.df, 
+                                       type = "class")
+cart.model.report <- confusionMatrix(default.ct.point.pred.valid, as.factor(telecom.test.df$Churn))
+cart.model.report
+rpart.plot(pruned.ct, box.palette="RdBu", shadow.col="gray", nn=TRUE)
+rpart.rules(pruned.ct,style = "tallw")
+```
+#KNN
+```{r message=FALSE, warning=FALSE}
+set.seed(123)
+valid.index <- createDataPartition(telecom.churn.final$Churn , p=0.60, list = FALSE)
+telecom.train.knn.df <- telecom.churn.final[valid.index,]
+telecom.test.knn.df <- telecom.churn.final[-valid.index,]
+test.knn.df <- createDataPartition(telecom.test.df$Churn, p = 0.5, list = FALSE)
+telecom.test.one.knn <- telecom.test.knn.df[test.knn.df,]
+telecom.test.two.knn <- telecom.test.knn.df[-test.knn.df,]
+
+
+##scaling continuous.var
+normalized.value <- preProcess(telecom.train.knn.df[,continuous.var],method = c("center","scale"))
+telecom.train.norm.knn <- predict(normalized.value, telecom.train.knn.df)
+telecom.test.norm.knn <- predict(normalized.value, telecom.test.one.knn)
+telecom.test.norm.knn.two <- predict(normalized.value, telecom.test.two.knn)
+
+
+
+dependent.vars <- colnames(telecom.train.norm.knn[!(colnames(telecom.train.norm.knn) %in% target.col)])
+accuracy.df <- data.frame(k = seq(1, 50, 1), accuracy = rep(0, 50))
+
+  ### compute knn for different k on validation
+ 
+for(i in 1:50) {
+  knn.pred <- knn(telecom.train.norm.knn[,dependent.vars], telecom.test.norm.knn[,dependent.vars],
+                  cl = factor(telecom.train.norm.knn[, target.col],labels = c(0,1)), k = i)
+  accuracy.df[i, 2] <- confusionMatrix(factor(knn.pred, labels = c(0,1)), factor(telecom.test.norm.knn[, target.col],labels = c(0,1)))$overall[1]
+}
+ 
+ggplot(data = accuracy.df)+
+  geom_line(aes(x = k, y=accuracy))+
+  theme_minimal()+
+  ggtitle("Cross-validation curve")
+
+## Computationally expensive High accuracy
+accuracy.df[which(accuracy.df$accuracy == max(accuracy.df$accuracy)),]
+knn.pred.final <- knn(telecom.train.norm.knn[,dependent.vars], telecom.test.norm.knn.two[,dependent.vars],
+                  cl = telecom.train.norm.knn[, target.col], k = 38,prob = TRUE)
+knn.model.report <- confusionMatrix(factor(knn.pred.final, labels = c(0,1)), factor(telecom.test.norm.knn.two[, target.col],labels = c(0,1)))
+knn.model.report
+
+## Computationally inexpensive reasonable accuracy
+accuracy.df[which(accuracy.df$accuracy == max(accuracy.df$accuracy)),]
+knn.pred.final <- knn(telecom.train.norm.knn[,dependent.vars], telecom.test.norm.knn.two[,dependent.vars],
+                  cl = telecom.train.norm.knn[, target.col], k = 9,prob = TRUE)
+knn.model.report <- confusionMatrix(factor(knn.pred.final, labels = c(0,1)), factor(telecom.test.norm.knn.two[, target.col],labels = c(0,1)))
+knn.model.report
+
+```
+
+##LDA
+
+```{r}
+set.seed(123)
+
+#dropping customerID
+telecom.lda.df <- churn.df.complete[,-1]
+
+
+#dropping multiple columns
+telecom.lda.final <- telecom.lda.df[,!(colnames(telecom.lda.df) %in% c(multiple.cols,"tenure_group"))]
+
+
+for (bin.cols in binary.cols){
+   if(bin.cols != "gender"){
+    telecom.lda.final[,bin.cols] <- ifelse(telecom.lda.final[,bin.cols] == "Yes",1,0) 
+   }
+  else{
+    telecom.lda.final[,bin.cols] <- ifelse(telecom.lda.final[,bin.cols] == "Male",1,0)
+  }
+  
+}
+
+telecom.lda.final[,target.col] <- ifelse(telecom.lda.final[,target.col] == "Yes",1,0) 
+
+
+valid.index <- createDataPartition(telecom.lda.final$Churn , p=0.75, list = FALSE)
+telecom.train.df <- telecom.lda.final[valid.index,]
+telecom.test.df <- telecom.lda.final[-valid.index,]
+
+##scaling continuous.var
+normalized.value <- preProcess(telecom.train.df[,continuous.var],method = c("center","scale"))
+telecom.train.norm <- predict(normalized.value, telecom.train.df)
+telecom.test.norm <- predict(normalized.value, telecom.test.df)
+lda.model <- lda(Churn~.,data=telecom.train.df)
+lda.model
+
+```
+
+```{r}
+# predict - using validation data
+pred.lda.model <- predict(lda.model, telecom.test.df)
+
+xtab <- table(pred.lda.model$class, telecom.test.df$Churn)
+lda.model.report <- caret::confusionMatrix(xtab, positive = "0")
+lda.model.report
+
+probability <- as.data.frame(pred.lda.model$posterior)
+pred.LDA <- data.frame(telecom.test.df$Churn, probability$`1`)
+colnames(pred.LDA) <- c("target","score")
+lift.LDA <- lift(factor(target,labels = c(0,1)) ~ score, data = pred.LDA, cuts=10, class="1")
+xyplot(lift.LDA, main="LDA - Lift Chart", type=c("l","g"), lwd=2
+       , scales=list(x=list(alternating=FALSE,tick.number = 10)
+                     ,y=list(alternating=FALSE,tick.number = 10)))
+#Decile
+gain <- gains((pred.LDA$target), pred.LDA$score)
+barplot(gain$mean.resp / mean(as.numeric(as.character(pred.LDA$target))), names.arg = gain$depth, xlab = "Percentile",ylab = "Mean Response", main = "Decile-wise lift chart", ylim = c(0,3))
+
+```
+
+
+
+
+##Model Comparison
+
+```{r}
+model.report <- rbind.data.frame(t(logit.model.report$byClass),t(cart.model.report$byClass),t(knn.model.report$byClass),t(lda.model.report$byClass))
+model.report$ModelName <- c("Logisitic Regression","Cart","K-Nearest Neighbour","Discriminant Analysis")
+modelcomparison <- plot_ly(x = model.report$Sensitivity, y = model.report$ModelName,name = "Sensitivity", type = 'bar', orientation = 'h')%>%
+  add_trace(x= model.report$Specificity,name = "Specificity")%>%
+  add_trace(x= model.report$Precision,name = "Precision")%>%
+  add_trace(x= model.report$F1 ,name = "F1")
+
+modelcomparison
+
+##Confusion Matrix
+confusionplot <- function(model,modelname){
+  q <- as.data.frame(model$table)
+  colnames(q) <- c("Prediction", "Reference", "Freq")
+  ggplot(data = q, mapping = aes(x = q$Prediction, y = q$Reference)) +
+    geom_tile(aes(fill = Freq)) +
+    geom_text(aes(label = sprintf("%1.0f", Freq)), vjust = 1) +
+    scale_fill_gradient(low = "blue",
+                      high = "red",
+                      trans = "log") +
+    xlab("Prediction") + ylab("Reference") + ggtitle(modelname)
+}
+
+grid.arrange(confusionplot(logit.model.report,"Logistic Regression"), confusionplot(cart.model.report,"CART Model"),confusionplot(knn.model.report,"K-Nearest Neignbour"),confusionplot(lda.model.report,"Discriminant Analysis"), nrow = 2)
+
+```
